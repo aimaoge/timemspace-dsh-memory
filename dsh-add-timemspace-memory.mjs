@@ -545,25 +545,34 @@ function buildBlock({ serverName, url, key, eol }) {
     '',
     '# ---- TiMEM SPACE MCP 桥接（DSH 版 mcpServers 示例）----',
     '# 等价于其他平台 JSON: {"mcpServers":{"TiMEM-SPACE":{"url":"' + url + '","headers":{"X-API-Key":"..."}}}}',
-    `- id: ${ENTRY_ID}`,
-    "  name: '@deepseek-ai/dsh-mcp-client'",
-    '  config:',
-    `    serverName: ${serverName}`,
-    '    transport: streamable-http',
-    `    url: ${url}`,
-    '    headers:',
-    `      X-API-Key: ${yamlScalar(key)}`,
+    '# 注：cordis.patch.yml 是 id-targeted overlay，新增插件实例必须用 insert 语法（无 id → push 进根数组）',
+    '- insert:',
+    `    - id: ${ENTRY_ID}`,
+    "      name: '@deepseek-ai/dsh-mcp-client'",
+    '      config:',
+    `        serverName: ${serverName}`,
+    '        transport: streamable-http',
+    `        url: ${url}`,
+    '        headers:',
+    `          X-API-Key: ${yamlScalar(key)}`,
   ];
   return L.join(eol);
 }
 
-/** 找到 - id: <entryId> 的行号；没有则 -1。 */
-function findEntryLine(lines) {
-  for (let i = 0; i < lines.length; i++) {
-    const m = /^- id:\s*(\S+)\s*$/.exec(lines[i]);
-    if (m && m[1] === ENTRY_ID) return i;
+/** 找到 ENTRY_ID 条目所在顶层项（insert 列表或独立条目）范围 [start, end)；没有返回 null。 */
+function findEntryRange(lines) {
+  const idx = lines.findIndex((l) => {
+    const m = /^\s*- id:\s*(\S+)\s*$/.exec(l);
+    return m && m[1] === ENTRY_ID;
+  });
+  if (idx === -1) return null;
+  let start = idx;
+  while (start > 0 && !/^-\s/.test(lines[start - 1])) start--; // 上移到所属顶层项（- insert: 或独立 - id:）
+  let end = lines.length;
+  for (let i = idx + 1; i < lines.length; i++) {
+    if (/^-\s/.test(lines[i])) { end = i; break; } // 下一个顶层项
   }
-  return -1;
+  return { start, end };
 }
 
 /** 幂等合并：空文件/`[]` → 直接替换；已存在 → 原位更新（含其上方注释）；否则追加到末尾。 */
@@ -573,28 +582,20 @@ function applyPatch(content, block, eol) {
     return block.replace(/^\s*\r?\n/, '') + eol;
   }
   const lines = content.split(/\r?\n/);
-  const entryLine = findEntryLine(lines);
-  if (entryLine === -1) {
+  const range = findEntryRange(lines);
+  if (!range) {
     return content.replace(/\s+$/, '') + block + eol;
   }
   // 向上吞掉该条目上方的注释/空行，整体替换
-  let start = entryLine;
+  let start = range.start;
   while (start > 0) {
     const prev = lines[start - 1].trim();
     if (prev === '' || prev.startsWith('#')) start--;
     else break;
   }
-  // 下一个条目必须从 entryLine 之后找（start 可能已被上移到注释行）
-  let end = lines.length;
-  for (let i = entryLine + 1; i < lines.length; i++) {
-    if (/^- id:\s*\S+\s*$/.test(lines[i])) {
-      end = i;
-      break;
-    }
-  }
   const newLines = block.split(eol);
   if (newLines[0] === '') newLines.shift();
-  lines.splice(start, end - start, ...newLines);
+  lines.splice(start, range.end - start, ...newLines);
   return lines.join(eol);
 }
 
@@ -603,19 +604,15 @@ function removeEntry(content, eol) {
   const trimmed = content.trim();
   if (trimmed === '' || trimmed === '[]') return content;
   const lines = content.split(/\r?\n/);
-  const entryLine = findEntryLine(lines);
-  if (entryLine === -1) return content;
-  let start = entryLine;
+  const range = findEntryRange(lines);
+  if (!range) return content;
+  let start = range.start;
   while (start > 0) {
     const prev = lines[start - 1].trim();
     if (prev === '' || prev.startsWith('#')) start--;
     else break;
   }
-  let end = lines.length;
-  for (let i = entryLine + 1; i < lines.length; i++) {
-    if (/^- id:\s*\S+\s*$/.test(lines[i])) { end = i; break; }
-  }
-  lines.splice(start, end - start);
+  lines.splice(start, range.end - start);
   let out = lines.join(eol).replace(/\s+$/, '');
   return out.trim() === '' ? '[]' + eol : out + eol;
 }
@@ -694,7 +691,7 @@ async function runUninstall(opts) {
     console.log(`[卸载] 未找到 ${ENTRY_ID} 条目（可能已卸载）。`);
   }
 
-  if (!opts.keepSkill) {
+  if (!opts.keepSkill && !opts.noSkill) {
     let names;
     if (opts.skill) {
       names = String(opts.skill).split(',').map((s) => s.trim()).filter(Boolean);

@@ -1,6 +1,6 @@
 {
   "name": "timemspace-dsh-memory",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "一键向 DeepSeek Harness 追加 TiMEM-SPACE MCP 桥接：自动查找 cordis.patch.yml，交互式输入 API Key，幂等追加/更新配置",
   "type": "module",
   "bin": {

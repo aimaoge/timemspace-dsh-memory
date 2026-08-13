@@ -2,6 +2,19 @@
 
 All notable changes to this project are documented in this file.
 
+## [v0.8.0] - 2026-08-14
+
+### Fixed
+
+- **关键修复**：新增插件实例改用 `insert` 语法写入 `cordis.patch.yml`（原直接条目是 id-targeted overlay，cordis 报 `entry not found`，导致 mcp-client 从未被加载、MCP 工具始终不可用）
+- `--uninstall` 尊重 `--no-skill`（卸载时不删除与其他平台共享的 skill）
+
+## [v0.7.0] - 2026-08-14
+
+### Fixed
+
+- 目标配置文件统一为 `cordis.yml`（过渡版本；v0.8.0 已改用 `insert` 语法写回官方用户层 `cordis.patch.yml`）
+
 ## [v0.6.0] - 2026-08-14
 
 ### Added
