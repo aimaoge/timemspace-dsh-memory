@@ -8,7 +8,8 @@
  *   2. 命令行追问 API Key（粘贴输入，不回显；可 --key 免交互）
  *   3. 幂等追加/更新 "TiMEM-SPACE" 桥接实例（@deepseek-ai/dsh-mcp-client）
  *   4. 自动安装配套 skill（general 默认 / coding、writing 备选）
- *   5. 连接验证（--verify）与 DSH 重启引导
+ *   5. 连接验证（--verify）、DSH 重启引导
+ *   6. 维护：--uninstall 卸载、--check-update / --update 升级
  *
  * 兼容性：Windows 7/10/11、Linux、macOS —— 只需要 node（DSH 依赖 node，
  * 任何能跑 DSH 的机器都自带）。无第三方依赖，仅用 node 内置模块。
@@ -43,6 +44,7 @@ function parseArgs(argv) {
     dryRun: false, yes: false, help: false, version: false, checkUpdate: false,
     verify: false, noVerify: false, noRestart: false,
     noSkill: false, forceSkill: false, skillDir: null, skill: null,
+    uninstall: false, update: false, keepSkill: false,
   };
   const TAKES_VALUE = new Set(['--file', '--key', '--url', '--server-name', '--skill-dir', '--skill']);
   for (let i = 0; i < argv.length; i++) {
@@ -61,6 +63,9 @@ function parseArgs(argv) {
       case '--verify': opts.verify = true; break;
       case '--no-verify': opts.noVerify = true; break;
       case '--no-restart': opts.noRestart = true; break;
+      case '--uninstall': opts.uninstall = true; break;
+      case '--update': opts.update = true; break;
+      case '--keep-skill': opts.keepSkill = true; break;
       case '--no-skill': opts.noSkill = true; break;
       case '--skill': opts.skill = val; break;
       case '--force-skill': opts.forceSkill = true; break;
@@ -80,23 +85,30 @@ function printHelp() {
   console.log(`用法: node ${path.basename(process.argv[1])} [选项]
   一键向 DeepSeek Harness 集成 TiMEM-SPACE 记忆：写 MCP 桥接配置 + 装配套 skill + 验证连接 + 重启引导。
 
-选项:
-  --file <path>        指定 cordis.patch.yml（跳过自动查找）
-  --key <key>          直接提供 API Key（跳过交互输入）
-  --url <url>          MCP 端点，默认 ${DEFAULTS.url}
+安装:
+  （无参数）          自动查找 cordis.patch.yml + 交互输入 key + 验证 + 装 skill + 询问重启
+  --file <path>       指定 cordis.patch.yml（跳过自动查找）
+  --key <key>         API Key（优先级: --key > 环境变量 TiMEM_API_KEY > 交互输入）
+  --url <url>         MCP 端点，默认 ${DEFAULTS.url}
   --server-name <name> 工具命名空间，默认 ${DEFAULTS.serverName}
-  --dry-run            只打印将要写入的内容，不修改文件
-  --verify             只验证 MCP 端点连通/认证/工具清单，不修改配置
-  --no-verify          写入配置后跳过自动验证
-  --no-restart          写入后不询问是否重启 DSH（直接打印重启命令）
-  --no-skill            跳过配套 skill 安装
-  --skill <names>       安装指定 skill：general,coding,writing 或 all（默认 general；交互模式逐一询问备选）
-  --force-skill         覆盖已存在的同名 skill（默认会询问）
-  --skill-dir <dir>     自定义 skill 安装目录（默认 DSH 用户级 ~/.dsh/skills）
-  -y, --yes            跳过确认
-  -v, --version        显示当前版本
-  --check-update       检查是否有新版本（对比 GitHub 最新 tag）
-  -h, --help           显示帮助`);
+  --skill <names>     安装 skill：general,coding,writing 或 all（默认 general；交互模式逐一询问备选）
+  --no-skill          跳过配套 skill 安装
+  --force-skill       覆盖已存在的同名 skill（默认会询问）
+  --skill-dir <dir>   自定义 skill 安装目录（默认 ~/.dsh/skills）
+  -y, --yes           跳过确认
+
+验证:
+  --verify            只验证 MCP 端点连通/认证/工具清单，不修改配置
+  --dry-run           只打印将要写入的内容，不修改文件
+  --no-verify         写入配置后跳过自动验证
+
+维护:
+  --uninstall         卸载：移除 ${ENTRY_ID} 条目 + 删除 skill（--keep-skill 保留；--skill 指定删哪个）
+  --check-update      检查是否有新版本（对比 GitHub 最新 tag）
+  --update            检查并一键升级（发现新版自动清 npx 缓存并给出重跑命令）
+  --no-restart        不询问是否重启 DSH（直接打印重启命令）
+  -v, --version       显示当前版本
+  -h, --help          显示帮助`);
 }
 
 /* ------------------------- 交互输入 ------------------------- */
@@ -586,6 +598,126 @@ function applyPatch(content, block, eol) {
   return lines.join(eol);
 }
 
+/** 从内容中移除 ENTRY_ID 条目（含其上方注释/空行）；没有则原样返回。 */
+function removeEntry(content, eol) {
+  const trimmed = content.trim();
+  if (trimmed === '' || trimmed === '[]') return content;
+  const lines = content.split(/\r?\n/);
+  const entryLine = findEntryLine(lines);
+  if (entryLine === -1) return content;
+  let start = entryLine;
+  while (start > 0) {
+    const prev = lines[start - 1].trim();
+    if (prev === '' || prev.startsWith('#')) start--;
+    else break;
+  }
+  let end = lines.length;
+  for (let i = entryLine + 1; i < lines.length; i++) {
+    if (/^- id:\s*\S+\s*$/.test(lines[i])) { end = i; break; }
+  }
+  lines.splice(start, end - start);
+  let out = lines.join(eol).replace(/\s+$/, '');
+  return out.trim() === '' ? '[]' + eol : out + eol;
+}
+
+/** 原子写入：先写临时文件再 rename，避免中途崩溃损坏配置。 */
+function atomicWrite(file, content) {
+  const tmp = `${file}.tmp-${process.pid}`;
+  fs.writeFileSync(tmp, content, 'utf8');
+  fs.renameSync(tmp, file);
+}
+
+/** 解析配置文件路径（--file 优先，否则自动查找）。 */
+async function resolveConfigFile(opts) {
+  if (opts.file) {
+    if (!fs.existsSync(opts.file)) throw new Error(`配置文件不存在: ${opts.file}`);
+    return opts.file;
+  }
+  const files = findPatchFiles(candidateRoots());
+  if (files.length === 0) throw new Error('未找到 cordis.patch.yml（查找位置: $DSH_HOME、~/.dsh、npm npx 缓存），请用 --file 指定');
+  return pickFile(files);
+}
+
+/** 卸载 skill 目录。 */
+function uninstallSkill(skillRoot, names) {
+  for (const name of names) {
+    const meta = SKILLS[name];
+    if (!meta) { console.log(`[卸载] 未知 skill: ${name}`); continue; }
+    const dir = path.join(skillRoot, meta.dir);
+    if (fs.existsSync(dir)) {
+      fs.rmSync(dir, { recursive: true, force: true });
+      console.log(`[卸载] skill 已删除: ${dir}`);
+    } else {
+      console.log(`[卸载] skill 不存在（跳过）: ${dir}`);
+    }
+  }
+}
+
+/** --update：检查最新版本；有新版则清理 npx 缓存并提示重跑。 */
+async function updateTool(repo) {
+  const cur = pkgVersion();
+  const tags = await fetchJSON(`https://api.github.com/repos/${repo}/tags`);
+  if (!Array.isArray(tags) || tags.length === 0) {
+    console.log(`[升级] 当前 v${cur}；无法检查远程版本（网络/TLS）。手动升级: npm cache clean --force 后重新执行 npx。`);
+    return;
+  }
+  const latest = tags.map((t) => t.name).filter((n) => /^v?\d+\.\d+\.\d+$/.test(n)).sort(compareSemver).at(-1);
+  if (!latest || compareSemver(latest, `v${cur}`) <= 0) {
+    console.log(`[升级] 已是最新版本 v${cur}。`);
+    return;
+  }
+  console.log(`[升级] 发现新版本 ${latest}（当前 v${cur}），正在清理 npx 缓存…`);
+  const npmCmd = process.platform === 'win32' ? 'npm.cmd' : 'npm';
+  const r = await execOut(npmCmd, ['cache', 'clean', '--force']);
+  if (r.code === 0) {
+    console.log(`[升级] 缓存已清理。重新执行即可获得最新版:\n  npx --yes github:${repo}\n  或固定版本: npx --yes github:${repo}#${latest}`);
+  } else {
+    console.log(`[升级] 缓存清理失败（${String(r.out).trim() || r.code}），请手动执行 npm cache clean --force 后重跑。`);
+  }
+}
+
+/** --uninstall：移除 MCP 条目 + 卸载 skill + 重启引导。 */
+async function runUninstall(opts) {
+  const file = await resolveConfigFile(opts);
+  console.log(`[信息] 目标配置文件: ${file}`);
+  const raw = fs.readFileSync(file, 'utf8');
+  const eol = raw.includes('\r\n') ? '\r\n' : '\n';
+  const after = removeEntry(raw, eol);
+  if (after !== raw) {
+    if (!opts.yes) {
+      const ans = await askLine(`确认从 ${file} 移除 ${ENTRY_ID} 条目？(y/N) `);
+      if (!/^y(es)?$/i.test(ans)) { console.log('已取消。'); return; }
+    }
+    atomicWrite(file, after);
+    console.log(`[卸载] 已移除 ${ENTRY_ID} 条目: ${file}`);
+  } else {
+    console.log(`[卸载] 未找到 ${ENTRY_ID} 条目（可能已卸载）。`);
+  }
+
+  if (!opts.keepSkill) {
+    let names;
+    if (opts.skill) {
+      names = String(opts.skill).split(',').map((s) => s.trim()).filter(Boolean);
+      if (names.includes('all')) names = ['general', 'coding', 'writing'];
+    } else {
+      names = ['general', 'coding', 'writing'];
+    }
+    const skillRoot = opts.skillDir || path.join(process.env.DSH_HOME || path.join(os.homedir(), '.dsh'), 'skills');
+    console.log('');
+    uninstallSkill(skillRoot, names);
+  }
+
+  if (opts.noRestart) {
+    console.log(`\n[重启] 卸载完成。重启 DSH 使配置生效: ${dshRestartCommand()}`);
+  } else if (process.stdin.isTTY) {
+    const ans = await askLine('\n需要现在重启 DSH 使配置生效吗？(y/N) ');
+    if (/^y(es)?$/i.test(ans)) await restartDsh();
+    else console.log(`\n[重启] 稍后手动重启: ${dshRestartCommand()}`);
+  } else {
+    console.log(`\n[重启] 非交互模式，请手动重启 DSH: ${dshRestartCommand()}`);
+  }
+}
+
 /* ------------------------- 主流程 ------------------------- */
 async function main() {
   const opts = parseArgs(process.argv.slice(2));
@@ -601,6 +733,14 @@ async function main() {
     await checkUpdate(DEFAULTS.githubRepo);
     process.exit(0);
   }
+  if (opts.update) {
+    await updateTool(DEFAULTS.githubRepo);
+    process.exit(0);
+  }
+  if (opts.uninstall) {
+    await runUninstall(opts);
+    process.exit(0);
+  }
 
   const serverName = opts.serverName || DEFAULTS.serverName;
   if (!/^[A-Za-z0-9_-]{1,32}$/.test(serverName)) {
@@ -609,8 +749,8 @@ async function main() {
   }
   const url = opts.url || DEFAULTS.url;
 
-  // 2) 获取 API Key
-  let key = opts.key;
+  // 2) 获取 API Key（优先级: --key > 环境变量 TiMEM_API_KEY > 交互输入）
+  let key = opts.key || process.env.TiMEM_API_KEY || process.env.TIMEM_API_KEY || null;
   if (!key) {
     key = await askSecret('请输入 TiMEM API Key（粘贴后回车，不回显）: ');
     if (!key) {
@@ -665,7 +805,7 @@ async function main() {
       process.exit(0);
     }
   }
-  fs.writeFileSync(file, updated, 'utf8');
+  atomicWrite(file, updated);
 
   // 5) 结果与对照
   console.log(`\n[完成] 已写入: ${file}`);

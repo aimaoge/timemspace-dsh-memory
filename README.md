@@ -53,7 +53,7 @@ npx --yes github:aimaoge/timemspace-dsh-memory --verify --key sk-xxxx
 | 选项 | 说明 |
 |---|---|
 | `--file <path>` | 指定 `cordis.patch.yml`（跳过自动查找） |
-| `--key <key>` | 直接提供 API Key（跳过交互输入） |
+| `--key <key>` | 直接提供 API Key（优先级：`--key` > 环境变量 `TiMEM_API_KEY` > 交互输入） |
 | `--url <url>` | MCP 端点，默认 `https://api.space.timem.cloud/mcp/` |
 | `--server-name <name>` | 工具命名空间，默认 `timem-space` |
 | `--dry-run` | 只打印将要写入的内容，不修改文件 |
@@ -64,6 +64,9 @@ npx --yes github:aimaoge/timemspace-dsh-memory --verify --key sk-xxxx
 | `--no-skill` | 跳过配套 skill 安装 |
 | `--force-skill` | 覆盖已存在的同名 skill（默认会询问） |
 | `--skill-dir <dir>` | 自定义 skill 安装目录（默认 `~/.dsh/skills`） |
+| `--uninstall` | 卸载：移除 MCP 条目 + 删除 skill（`--keep-skill` 保留；`--skill` 指定删哪个） |
+| `--update` | 检查并一键升级（发现新版自动清 npx 缓存并提示重跑） |
+| `--keep-skill` | 配合 `--uninstall`：保留 skill 不删除 |
 | `-y, --yes` | 跳过确认 |
 | `-h, --help` | 帮助 |
 
@@ -83,10 +86,26 @@ node dsh-add-timemspace-memory.mjs [选项]
 - 跨平台：Windows 7/10/11、Linux、macOS，纯 Node 内置模块零依赖
 - 保持原文件换行符（CRLF/LF）与 UTF-8 编码
 
+## 维护
+
+```bash
+# 检查是否有新版本
+npx --yes github:aimaoge/timemspace-dsh-memory --check-update
+
+# 一键升级（发现新版自动清 npx 缓存并提示重跑）
+npx --yes github:aimaoge/timemspace-dsh-memory --update
+
+# 卸载：移除 MCP 条目 + 删除已装 skill
+npx --yes github:aimaoge/timemspace-dsh-memory --uninstall
+
+# 只移除 MCP 条目，保留 skill
+npx --yes github:aimaoge/timemspace-dsh-memory --uninstall --keep-skill
+```
+
 ## 版本
 
-- 当前版本：**v0.5.0**，查看：`npx --yes github:aimaoge/timemspace-dsh-memory --version`
-- 固定版本（可复现）：`npx --yes github:aimaoge/timemspace-dsh-memory#v0.5.0`
+- 当前版本：**v0.6.0**，查看：`npx --yes github:aimaoge/timemspace-dsh-memory --version`
+- 固定版本（可复现）：`npx --yes github:aimaoge/timemspace-dsh-memory#v0.6.0`
 - 检查是否有新版本：`npx --yes github:aimaoge/timemspace-dsh-memory --check-update`
 
 > **升级机制说明**：`npx github:...` 不带 tag 时指向默认分支最新代码，但 npx 对同一 spec 有缓存，**不会自动感知新版本**——升级到最新请先 `npm cache clean --force` 再重跑；或直接用 `#vX.Y.Z` 固定到新 tag。
