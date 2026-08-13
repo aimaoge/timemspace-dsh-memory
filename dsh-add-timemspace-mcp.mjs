@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * dsh-add-mcp-timem.mjs — 一键向 DeepSeek Harness 追加 TiMEM MCP 桥接
+ * dsh-add-timemspace-mcp.mjs — 一键向 DeepSeek Harness 追加 TiMEM-SPACE MCP 桥接
  *
  * 功能：
  *   1. 自动搜索 DSH 安装目录下的 cordis.patch.yml
@@ -13,11 +13,11 @@
  * 任何能跑 DSH 的机器都自带）。无第三方依赖，仅用 node 内置模块。
  *
  * 用法：
- *   node dsh-add-mcp-timem.mjs                        # 自动找配置 + 追问 key
- *   node dsh-add-mcp-timem.mjs --file <path>          # 指定配置文件
- *   node dsh-add-mcp-timem.mjs --key sk-xxxx -y       # 免交互（脚本/CI 用）
- *   node dsh-add-mcp-timem.mjs --dry-run --key sk-x   # 只预览不落盘
- *   node dsh-add-mcp-timem.mjs --url https://api.space.timem.cloud/mcp/ \
+ *   node dsh-add-timemspace-mcp.mjs                    # 自动找配置 + 追问 key
+ *   node dsh-add-timemspace-mcp.mjs --file <path>      # 指定配置文件
+ *   node dsh-add-timemspace-mcp.mjs --key sk-xxxx -y   # 免交互（脚本/CI 用）
+ *   node dsh-add-timemspace-mcp.mjs --dry-run --key sk-x  # 只预览不落盘
+ *   node dsh-add-timemspace-mcp.mjs --url https://api.space.timem.cloud/mcp/ \
  *        --server-name timem-space --key sk-xxxx -y
  */
 import fs from 'node:fs';
