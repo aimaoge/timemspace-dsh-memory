@@ -26,6 +26,7 @@ import path from 'node:path';
 import readline from 'node:readline';
 import https from 'node:https';
 import { spawn } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 
 const ENTRY_ID = 'mcp-timem-space';
 const DEFAULTS = {
@@ -40,8 +41,9 @@ function parseArgs(argv) {
     file: null, key: null, url: null, serverName: null,
     dryRun: false, yes: false, help: false, version: false, checkUpdate: false,
     verify: false, noVerify: false, noRestart: false,
+    noSkill: false, forceSkill: false, skillDir: null,
   };
-  const TAKES_VALUE = new Set(['--file', '--key', '--url', '--server-name']);
+  const TAKES_VALUE = new Set(['--file', '--key', '--url', '--server-name', '--skill-dir']);
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     const eq = a.indexOf('=');
@@ -58,6 +60,9 @@ function parseArgs(argv) {
       case '--verify': opts.verify = true; break;
       case '--no-verify': opts.noVerify = true; break;
       case '--no-restart': opts.noRestart = true; break;
+      case '--no-skill': opts.noSkill = true; break;
+      case '--force-skill': opts.forceSkill = true; break;
+      case '--skill-dir': opts.skillDir = val; break;
       case '--dry-run': opts.dryRun = true; break;
       case '--yes': case '-y': opts.yes = true; break;
       case '--help': case '-h': opts.help = true; break;
@@ -82,6 +87,9 @@ function printHelp() {
   --verify             只验证 MCP 端点连通/认证/工具清单，不修改配置
   --no-verify          写入配置后跳过自动验证
   --no-restart          写入后不询问是否重启 DSH（直接打印重启命令）
+  --no-skill            跳过配套 skill 安装
+  --force-skill         覆盖已存在的同名 skill（默认会询问）
+  --skill-dir <dir>     自定义 skill 安装目录（默认 DSH 用户级 ~/.dsh/skills）
   -y, --yes            跳过确认
   -v, --version        显示当前版本
   --check-update       检查是否有新版本（对比 GitHub 最新 tag）
@@ -465,6 +473,41 @@ async function restartDsh() {
   console.log(`  ${dshRestartCommand()}`);
 }
 
+/* ------------------------- skill 安装 ------------------------- */
+const SKILL_SRC = new URL('./skills/timem-general-memory/SKILL.md', import.meta.url);
+
+/** 把内置的 timem-general-memory skill 安装到 DSH skill 根目录（幂等；内容不同时询问/按 --force-skill 覆盖）。 */
+async function installSkill(skillRoot, force) {
+  const src = fileURLToPath(SKILL_SRC);
+  if (!fs.existsSync(src)) {
+    console.log('[skill] 未找到内置 skill 文件（包不完整？），跳过安装。');
+    return;
+  }
+  const dest = path.join(skillRoot, 'timem-general-memory', 'SKILL.md');
+  const srcContent = fs.readFileSync(src, 'utf8');
+  if (fs.existsSync(dest)) {
+    if (fs.readFileSync(dest, 'utf8') === srcContent) {
+      console.log(`[skill] 已安装且为最新版本（无需更新）: ${dest}`);
+      return;
+    }
+    console.log(`[skill] 检测到同名 skill 内容不同: ${dest}`);
+    if (process.stdin.isTTY) {
+      const ans = await askLine('  覆盖为内置版本？(y/N) ');
+      if (!/^y(es)?$/i.test(ans)) {
+        console.log('[skill] 跳过（保留现有版本），可用 --force-skill 强制覆盖。');
+        return;
+      }
+    } else if (!force) {
+      console.log('[skill] 非交互模式跳过覆盖（--force-skill 可强制）。');
+      return;
+    }
+  }
+  fs.mkdirSync(path.dirname(dest), { recursive: true });
+  fs.writeFileSync(dest, srcContent, 'utf8');
+  console.log(`[skill] 已安装: ${dest}`);
+  console.log('[skill] 重启 DSH 后新会话将自动携带 timem-general-memory 钩子（配合 mcp__* 工具）。');
+}
+
 /* ------------------------- YAML 补丁 ------------------------- */
 function yamlScalar(v) {
   return /^[A-Za-z0-9_\-./]+$/.test(v) ? v : JSON.stringify(v);
@@ -638,6 +681,13 @@ async function main() {
       console.log('\n[提示] 配置已写入，但连接验证未通过——请按上面原因修正后重跑本脚本，再重启 DSH。');
       return;
     }
+  }
+
+  // 6b) 安装配套 skill（--no-skill 跳过）：MCP 工具 + skill 才是完整钩子
+  if (!opts.noSkill) {
+    console.log('');
+    const skillRoot = opts.skillDir || path.join(process.env.DSH_HOME || path.join(os.homedir(), '.dsh'), 'skills');
+    await installSkill(skillRoot, opts.forceSkill);
   }
 
   // 7) 重启引导：询问是否重启 / 打印重启命令
