@@ -38,6 +38,7 @@ function parseArgs(argv) {
   const opts = {
     file: null, key: null, url: null, serverName: null,
     dryRun: false, yes: false, help: false, version: false, checkUpdate: false,
+    verify: false, noVerify: false,
   };
   const TAKES_VALUE = new Set(['--file', '--key', '--url', '--server-name']);
   for (let i = 0; i < argv.length; i++) {
@@ -53,6 +54,8 @@ function parseArgs(argv) {
       case '--server-name': opts.serverName = val; break;
       case '--version': case '-v': opts.version = true; break;
       case '--check-update': opts.checkUpdate = true; break;
+      case '--verify': opts.verify = true; break;
+      case '--no-verify': opts.noVerify = true; break;
       case '--dry-run': opts.dryRun = true; break;
       case '--yes': case '-y': opts.yes = true; break;
       case '--help': case '-h': opts.help = true; break;
@@ -74,6 +77,8 @@ function printHelp() {
   --url <url>          MCP 端点，默认 ${DEFAULTS.url}
   --server-name <name> 工具命名空间，默认 ${DEFAULTS.serverName}
   --dry-run            只打印将要写入的内容，不修改文件
+  --verify             只验证 MCP 端点连通/认证/工具清单，不修改配置
+  --no-verify          写入配置后跳过自动验证
   -y, --yes            跳过确认
   -v, --version        显示当前版本
   --check-update       检查是否有新版本（对比 GitHub 最新 tag）
@@ -267,6 +272,111 @@ async function checkUpdate(repo) {
   }
 }
 
+/** 验证 MCP 端点连通性/认证/工具清单；返回是否通过。失败时给出可读原因。 */
+function verifyConnection(url, key, userId) {
+  return new Promise((resolve) => {
+    console.log(`[验证] 目标: ${url}`);
+    const rpcBody = (method, params, id) => JSON.stringify(
+      params ? { jsonrpc: '2.0', id, method, params } : { jsonrpc: '2.0', id, method }
+    );
+    const doRequest = (body, extraHeaders, done) => {
+      const req = https.request(new URL(url), {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'application/json, text/event-stream',
+          'X-API-Key': key,
+          ...(userId ? { 'X-TiMEM-User-Id': userId } : {}),
+          ...extraHeaders,
+        },
+      }, (res) => {
+        let data = '';
+        res.on('data', (c) => { data += c; });
+        res.on('end', () => {
+          let body = data;
+          // Streamable HTTP 可能以 SSE 返回：提取 data: 行再解析
+          if ((res.headers['content-type'] || '').includes('text/event-stream')) {
+            body = data.split('\n').filter((l) => l.startsWith('data:')).map((l) => l.slice(5)).join('\n');
+          }
+          done({ status: res.statusCode, headers: res.headers, body });
+        });
+      });
+      req.on('error', (e) => done({ error: e }));
+      req.setTimeout(15000, () => req.destroy(new Error('连接超时')));
+      req.end(body);
+    };
+
+    doRequest(
+      rpcBody('initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'dsh-add-mcp-verify', version: pkgVersion() } }, 1),
+      {},
+      (r1) => {
+        if (r1.error) {
+          console.log(`[验证] 失败: 无法连接 → ${r1.error.message}\n  可能原因: TiMEM 服务未启动 / URL 错误 / 网络或 TLS 问题`);
+          resolve(false);
+          return;
+        }
+        if (r1.status === 401 || r1.status === 403) {
+          console.log(`[验证] 失败: 认证被拒绝（HTTP ${r1.status}）\n  可能原因: API Key${userId ? ' 或用户 ID' : ''} 不正确/已失效，请到控制台重新生成`);
+          resolve(false);
+          return;
+        }
+        if (r1.status === 404) {
+          console.log('[验证] 失败: 端点不存在（HTTP 404）\n  可能原因: URL 未指向 MCP 端点（应以 /mcp 结尾）');
+          resolve(false);
+          return;
+        }
+        if (r1.status !== 200) {
+          console.log(`[验证] 失败: HTTP ${r1.status}\n  ${r1.body.slice(0, 300)}`);
+          resolve(false);
+          return;
+        }
+        let init;
+        try {
+          init = JSON.parse(r1.body);
+        } catch {
+          console.log('[验证] 失败: 响应不是有效 JSON（协议不兼容？）');
+          resolve(false);
+          return;
+        }
+        if (init.error) {
+          console.log(`[验证] 失败: ${JSON.stringify(init.error).slice(0, 300)}`);
+          resolve(false);
+          return;
+        }
+        const info = init.result?.serverInfo || {};
+        console.log(`[验证] 服务器: ${info.name || '未知'} ${info.version || ''}`);
+        console.log('[验证] 认证: 通过');
+        const sid = r1.headers['mcp-session-id'];
+        doRequest(rpcBody('tools/list', null, 2), sid ? { 'Mcp-Session-Id': sid } : {}, (r2) => {
+          if (r2.error) {
+            console.log(`[验证] 部分通过: 工具清单获取失败 → ${r2.error.message}`);
+            resolve(false);
+            return;
+          }
+          let list;
+          try {
+            list = JSON.parse(r2.body);
+          } catch {
+            console.log('[验证] 部分通过: 工具清单解析失败');
+            resolve(false);
+            return;
+          }
+          const tools = list.result?.tools;
+          if (!Array.isArray(tools)) {
+            console.log(`[验证] 部分通过: tools/list 异常 ${r2.body.slice(0, 200)}`);
+            resolve(false);
+            return;
+          }
+          const names = tools.map((t) => t.name);
+          console.log(`[验证] 工具: ${tools.length} 个（${names.slice(0, 6).join(', ')}${names.length > 6 ? ', …' : ''}）`);
+          console.log('[验证] 结论: 连接正常 ✅ 重启 DSH host 后即可在工具列表看到 mcp__* 工具');
+          resolve(true);
+        });
+      }
+    );
+  });
+}
+
 /* ------------------------- YAML 补丁 ------------------------- */
 function yamlScalar(v) {
   return /^[A-Za-z0-9_\-./]+$/.test(v) ? v : JSON.stringify(v);
@@ -353,6 +463,22 @@ async function main() {
   }
   const url = opts.url || DEFAULTS.url;
 
+  // 2) 获取 API Key
+  let key = opts.key;
+  if (!key) {
+    key = await askSecret('请输入 TiMEM API Key（粘贴后回车，不回显）: ');
+    if (!key) {
+      console.error('[错误] 未输入 API Key，已取消。');
+      process.exit(1);
+    }
+  }
+
+  // 2b) 仅验证模式：不找配置、不写文件，只测端点/认证/工具
+  if (opts.verify) {
+    const ok = await verifyConnection(url, key, null);
+    process.exit(ok ? 0 : 1);
+  }
+
   // 1) 找配置文件
   let file = opts.file;
   if (!file) {
@@ -372,16 +498,6 @@ async function main() {
     process.exit(1);
   }
   console.log(`[信息] 目标配置文件: ${file}`);
-
-  // 2) 获取 API Key
-  let key = opts.key;
-  if (!key) {
-    key = await askSecret('请输入 TiMEM API Key（粘贴后回车，不回显）: ');
-    if (!key) {
-      console.error('[错误] 未输入 API Key，已取消。');
-      process.exit(1);
-    }
-  }
 
   // 3) 生成并合并补丁
   const raw = fs.readFileSync(file, 'utf8');
@@ -409,6 +525,7 @@ async function main() {
   console.log(`\n[完成] 已写入: ${file}`);
   console.log(`[完成] 重启 DSH host 后，工具将以 mcp__${serverName}__* 命名注册`);
   console.log('        （如 mcp__timem-space__search_memories、mcp__timem-space__create_memory）\n');
+  const headers = { 'X-API-Key': key };
   console.log('等价的其他平台配置（供对照）:');
   console.log(
     JSON.stringify(
@@ -416,7 +533,7 @@ async function main() {
         mcpServers: {
           'TiMEM-SPACE': {
             url,
-            headers: { 'X-API-Key': key },
+            headers,
           },
         },
       },
@@ -424,6 +541,15 @@ async function main() {
       2
     )
   );
+
+  // 6) 写入后自动验证（--no-verify 跳过）：提前发现 key 错/URL 错/服务未启动
+  if (!opts.noVerify) {
+    console.log('');
+    const ok = await verifyConnection(url, key, null);
+    if (!ok) {
+      console.log('\n[提示] 配置已写入，但连接验证未通过——请按上面原因修正（如重试 --key）后重启 DSH。');
+    }
+  }
 }
 
 main().catch((err) => {
