@@ -17,6 +17,13 @@
 
 本工具把这个配置以 `@deepseek-ai/dsh-mcp-client` 插件实例的形式，写入 DSH profile 的 `cordis.patch.yml`。重启 DSH host 后，工具以 `mcp__timem-space__*` 命名注册（如 `mcp__timem-space__search_memories`）。
 
+## 前置条件
+
+1. 注册 TiMEM-SPACE 账号：[https://space.timem.cloud/](https://space.timem.cloud/)
+2. 登录后在控制台生成 **API Key**
+
+运行脚本时按提示粘贴，或直接用 `--key` 传入。
+
 ## 快速开始
 
 ```bash
@@ -57,6 +64,14 @@ node dsh-add-timemspace-mcp.mjs [选项]
 - 幂等：已存在条目时原地更新 key，不产生重复
 - 跨平台：Windows 7/10/11、Linux、macOS，纯 Node 内置模块零依赖
 - 保持原文件换行符（CRLF/LF）与 UTF-8 编码
+
+## 版本
+
+- 当前版本：**v0.1.0**，查看：`npx --yes github:aimaoge/timemspace-dsh-mcp --version`
+- 固定版本（可复现）：`npx --yes github:aimaoge/timemspace-dsh-mcp#v0.1.0`
+- 检查是否有新版本：`npx --yes github:aimaoge/timemspace-dsh-mcp --check-update`
+
+> **升级机制说明**：`npx github:...` 不带 tag 时指向默认分支最新代码，但 npx 对同一 spec 有缓存，**不会自动感知新版本**——升级到最新请先 `npm cache clean --force` 再重跑；或直接用 `#vX.Y.Z` 固定到新 tag。
 
 ## License
 

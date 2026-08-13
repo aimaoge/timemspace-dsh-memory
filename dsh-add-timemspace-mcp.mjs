@@ -24,18 +24,20 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import readline from 'node:readline';
+import https from 'node:https';
 
 const ENTRY_ID = 'mcp-timem-space';
 const DEFAULTS = {
   serverName: 'timem-space',
   url: 'https://api.space.timem.cloud/mcp/',
+  githubRepo: 'aimaoge/timemspace-dsh-mcp',
 };
 
 /* ------------------------- 命令行参数 ------------------------- */
 function parseArgs(argv) {
   const opts = {
     file: null, key: null, url: null, serverName: null,
-    dryRun: false, yes: false, help: false,
+    dryRun: false, yes: false, help: false, version: false, checkUpdate: false,
   };
   const TAKES_VALUE = new Set(['--file', '--key', '--url', '--server-name']);
   for (let i = 0; i < argv.length; i++) {
@@ -49,6 +51,8 @@ function parseArgs(argv) {
       case '--key': opts.key = val; break;
       case '--url': opts.url = val; break;
       case '--server-name': opts.serverName = val; break;
+      case '--version': case '-v': opts.version = true; break;
+      case '--check-update': opts.checkUpdate = true; break;
       case '--dry-run': opts.dryRun = true; break;
       case '--yes': case '-y': opts.yes = true; break;
       case '--help': case '-h': opts.help = true; break;
@@ -71,6 +75,8 @@ function printHelp() {
   --server-name <name> 工具命名空间，默认 ${DEFAULTS.serverName}
   --dry-run            只打印将要写入的内容，不修改文件
   -y, --yes            跳过确认
+  -v, --version        显示当前版本
+  --check-update       检查是否有新版本（对比 GitHub 最新 tag）
   -h, --help           显示帮助`);
 }
 
@@ -200,6 +206,67 @@ async function pickFile(files) {
   return chosen;
 }
 
+/* ------------------------- 版本检查 ------------------------- */
+function pkgVersion() {
+  try {
+    const pkg = JSON.parse(fs.readFileSync(new URL('./package.json', import.meta.url), 'utf8'));
+    return pkg.version || '0.0.0';
+  } catch {
+    return '0.0.0-dev';
+  }
+}
+
+function compareSemver(a, b) {
+  const pa = String(a).replace(/^v/, '').split('.').map(Number);
+  const pb = String(b).replace(/^v/, '').split('.').map(Number);
+  for (let i = 0; i < 3; i++) {
+    const x = pa[i] || 0;
+    const y = pb[i] || 0;
+    if (x !== y) return x - y;
+  }
+  return 0;
+}
+
+/** 简易 HTTPS GET 返回 JSON；失败（TLS/网络）返回 null，保证优雅降级。 */
+function fetchJSON(url) {
+  return new Promise((resolve) => {
+    const req = https.get(url, { headers: { 'User-Agent': 'dsh-add-mcp' } }, (res) => {
+      let data = '';
+      res.on('data', (c) => { data += c; });
+      res.on('end', () => {
+        try {
+          resolve(JSON.parse(data));
+        } catch {
+          resolve(null);
+        }
+      });
+    });
+    req.on('error', () => resolve(null));
+    req.setTimeout(10000, () => { req.destroy(); resolve(null); });
+  });
+}
+
+async function checkUpdate(repo) {
+  const cur = pkgVersion();
+  const tags = await fetchJSON(`https://api.github.com/repos/${repo}/tags`);
+  if (!Array.isArray(tags) || tags.length === 0) {
+    console.log(`[信息] 当前版本 v${cur}；无法检查远程版本（网络/TLS 或仓库无 tag）。`);
+    console.log('  提示：npx 有缓存，升级到最新请先运行 npm cache clean --force 再重试。');
+    return;
+  }
+  const latest = tags
+    .map((t) => t.name)
+    .filter((n) => /^v?\d+\.\d+\.\d+$/.test(n))
+    .sort(compareSemver)
+    .at(-1);
+  if (latest && compareSemver(latest, `v${cur}`) > 0) {
+    console.log(`[提示] 发现新版本 ${latest}（当前 v${cur}）`);
+    console.log(`  升级: npm cache clean --force 后重新执行 npx，或直接: npx --yes github:${repo}#${latest}`);
+  } else {
+    console.log(`[信息] 已是最新版本 v${cur}。`);
+  }
+}
+
 /* ------------------------- YAML 补丁 ------------------------- */
 function yamlScalar(v) {
   return /^[A-Za-z0-9_\-./]+$/.test(v) ? v : JSON.stringify(v);
@@ -268,6 +335,14 @@ async function main() {
   const opts = parseArgs(process.argv.slice(2));
   if (opts.help) {
     printHelp();
+    process.exit(0);
+  }
+  if (opts.version) {
+    console.log(`v${pkgVersion()}`);
+    process.exit(0);
+  }
+  if (opts.checkUpdate) {
+    await checkUpdate(DEFAULTS.githubRepo);
     process.exit(0);
   }
 
