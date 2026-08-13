@@ -1,23 +1,24 @@
 #!/usr/bin/env node
 /**
- * dsh-add-timemspace-mcp.mjs — 一键向 DeepSeek Harness 追加 TiMEM-SPACE MCP 桥接
+ * dsh-add-timemspace-memory.mjs — 一键向 DeepSeek Harness 集成 TiMEM-SPACE 记忆（MCP 桥接 + skill 钩子）
  *
  * 功能：
  *   1. 自动搜索 DSH 安装目录下的 cordis.patch.yml
  *      （$DSH_HOME → ~/.dsh → npm npx 缓存目录，可 --file 覆盖）
  *   2. 命令行追问 API Key（粘贴输入，不回显；可 --key 免交互）
  *   3. 幂等追加/更新 "TiMEM-SPACE" 桥接实例（@deepseek-ai/dsh-mcp-client）
- *   4. 支持 --dry-run 预览、--yes 跳过确认
+ *   4. 自动安装配套 skill（general 默认 / coding、writing 备选）
+ *   5. 连接验证（--verify）与 DSH 重启引导
  *
  * 兼容性：Windows 7/10/11、Linux、macOS —— 只需要 node（DSH 依赖 node，
  * 任何能跑 DSH 的机器都自带）。无第三方依赖，仅用 node 内置模块。
  *
  * 用法：
- *   node dsh-add-timemspace-mcp.mjs                    # 自动找配置 + 追问 key
- *   node dsh-add-timemspace-mcp.mjs --file <path>      # 指定配置文件
- *   node dsh-add-timemspace-mcp.mjs --key sk-xxxx -y   # 免交互（脚本/CI 用）
- *   node dsh-add-timemspace-mcp.mjs --dry-run --key sk-x  # 只预览不落盘
- *   node dsh-add-timemspace-mcp.mjs --url https://api.space.timem.cloud/mcp/ \
+ *   node dsh-add-timemspace-memory.mjs                     # 自动找配置 + 追问 key
+ *   node dsh-add-timemspace-memory.mjs --file <path>       # 指定配置文件
+ *   node dsh-add-timemspace-memory.mjs --key sk-xxxx -y    # 免交互（脚本/CI 用）
+ *   node dsh-add-timemspace-memory.mjs --dry-run --key sk-x  # 只预览不落盘
+ *   node dsh-add-timemspace-memory.mjs --url https://api.space.timem.cloud/mcp/ \
  *        --server-name timem-space --key sk-xxxx -y
  */
 import fs from 'node:fs';
@@ -41,9 +42,9 @@ function parseArgs(argv) {
     file: null, key: null, url: null, serverName: null,
     dryRun: false, yes: false, help: false, version: false, checkUpdate: false,
     verify: false, noVerify: false, noRestart: false,
-    noSkill: false, forceSkill: false, skillDir: null,
+    noSkill: false, forceSkill: false, skillDir: null, skill: null,
   };
-  const TAKES_VALUE = new Set(['--file', '--key', '--url', '--server-name', '--skill-dir']);
+  const TAKES_VALUE = new Set(['--file', '--key', '--url', '--server-name', '--skill-dir', '--skill']);
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     const eq = a.indexOf('=');
@@ -61,6 +62,7 @@ function parseArgs(argv) {
       case '--no-verify': opts.noVerify = true; break;
       case '--no-restart': opts.noRestart = true; break;
       case '--no-skill': opts.noSkill = true; break;
+      case '--skill': opts.skill = val; break;
       case '--force-skill': opts.forceSkill = true; break;
       case '--skill-dir': opts.skillDir = val; break;
       case '--dry-run': opts.dryRun = true; break;
@@ -76,7 +78,7 @@ function parseArgs(argv) {
 
 function printHelp() {
   console.log(`用法: node ${path.basename(process.argv[1])} [选项]
-  自动查找 DSH 的 cordis.patch.yml 并追加 TiMEM MCP 桥接（等价于其他平台的 mcpServers JSON）。
+  一键向 DeepSeek Harness 集成 TiMEM-SPACE 记忆：写 MCP 桥接配置 + 装配套 skill + 验证连接 + 重启引导。
 
 选项:
   --file <path>        指定 cordis.patch.yml（跳过自动查找）
@@ -88,6 +90,7 @@ function printHelp() {
   --no-verify          写入配置后跳过自动验证
   --no-restart          写入后不询问是否重启 DSH（直接打印重启命令）
   --no-skill            跳过配套 skill 安装
+  --skill <names>       安装指定 skill：general,coding,writing 或 all（默认 general；交互模式逐一询问备选）
   --force-skill         覆盖已存在的同名 skill（默认会询问）
   --skill-dir <dir>     自定义 skill 安装目录（默认 DSH 用户级 ~/.dsh/skills）
   -y, --yes            跳过确认
@@ -474,38 +477,50 @@ async function restartDsh() {
 }
 
 /* ------------------------- skill 安装 ------------------------- */
-const SKILL_SRC = new URL('./skills/timem-general-memory/SKILL.md', import.meta.url);
+/** 内置 skill 清单：general 默认必装；coding/writing 备选（writing 官方文件待提供）。 */
+const SKILLS = {
+  general: { dir: 'timem-general-memory', builtin: true, desc: '通用/个人场景' },
+  coding: { dir: 'timem-coding-memory', builtin: true, desc: 'coding 场景（仓库/调试/架构）' },
+  writing: { dir: 'timem-writing-memory', builtin: false, desc: 'writing 场景（文风/受众，官方文件待提供）' },
+};
 
-/** 把内置的 timem-general-memory skill 安装到 DSH skill 根目录（幂等；内容不同时询问/按 --force-skill 覆盖）。 */
-async function installSkill(skillRoot, force) {
-  const src = fileURLToPath(SKILL_SRC);
-  if (!fs.existsSync(src)) {
-    console.log('[skill] 未找到内置 skill 文件（包不完整？），跳过安装。');
-    return;
-  }
-  const dest = path.join(skillRoot, 'timem-general-memory', 'SKILL.md');
-  const srcContent = fs.readFileSync(src, 'utf8');
-  if (fs.existsSync(dest)) {
-    if (fs.readFileSync(dest, 'utf8') === srcContent) {
-      console.log(`[skill] 已安装且为最新版本（无需更新）: ${dest}`);
-      return;
+/** 把选中的内置 skill 安装到 DSH skill 根目录（幂等；内容不同时询问/按 --force-skill 覆盖）。 */
+async function installSkill(skillRoot, force, names) {
+  for (const name of names) {
+    const meta = SKILLS[name];
+    if (!meta) {
+      console.log(`[skill] 未知 skill: ${name}（可选: ${Object.keys(SKILLS).join(', ')}）`);
+      continue;
     }
-    console.log(`[skill] 检测到同名 skill 内容不同: ${dest}`);
-    if (process.stdin.isTTY) {
-      const ans = await askLine('  覆盖为内置版本？(y/N) ');
-      if (!/^y(es)?$/i.test(ans)) {
-        console.log('[skill] 跳过（保留现有版本），可用 --force-skill 强制覆盖。');
-        return;
+    const src = fileURLToPath(new URL(`./skills/${meta.dir}/SKILL.md`, import.meta.url));
+    if (!fs.existsSync(src)) {
+      console.log(`[skill] ${name}: 未内置官方 SKILL.md（${meta.desc}），跳过安装。`);
+      continue;
+    }
+    const dest = path.join(skillRoot, meta.dir, 'SKILL.md');
+    const srcContent = fs.readFileSync(src, 'utf8');
+    if (fs.existsSync(dest)) {
+      if (fs.readFileSync(dest, 'utf8') === srcContent) {
+        console.log(`[skill] ${name}: 已安装且为最新版本（无需更新）: ${dest}`);
+        continue;
       }
-    } else if (!force) {
-      console.log('[skill] 非交互模式跳过覆盖（--force-skill 可强制）。');
-      return;
+      console.log(`[skill] ${name}: 检测到同名 skill 内容不同: ${dest}`);
+      if (process.stdin.isTTY) {
+        const ans = await askLine('  覆盖为内置版本？(y/N) ');
+        if (!/^y(es)?$/i.test(ans)) {
+          console.log('[skill] 跳过（保留现有版本），可用 --force-skill 强制覆盖。');
+          continue;
+        }
+      } else if (!force) {
+        console.log('[skill] 非交互模式跳过覆盖（--force-skill 可强制）。');
+        continue;
+      }
     }
+    fs.mkdirSync(path.dirname(dest), { recursive: true });
+    fs.writeFileSync(dest, srcContent, 'utf8');
+    console.log(`[skill] ${name}: 已安装: ${dest}`);
   }
-  fs.mkdirSync(path.dirname(dest), { recursive: true });
-  fs.writeFileSync(dest, srcContent, 'utf8');
-  console.log(`[skill] 已安装: ${dest}`);
-  console.log('[skill] 重启 DSH 后新会话将自动携带 timem-general-memory 钩子（配合 mcp__* 工具）。');
+  console.log('[skill] 重启 DSH 后新会话将自动携带所选 skill 钩子（配合 mcp__* 工具）。');
 }
 
 /* ------------------------- YAML 补丁 ------------------------- */
@@ -684,10 +699,24 @@ async function main() {
   }
 
   // 6b) 安装配套 skill（--no-skill 跳过）：MCP 工具 + skill 才是完整钩子
+  //     general 默认必装；coding/writing 通过 --skill 指定，或交互模式逐一询问（备选）
   if (!opts.noSkill) {
+    let skillNames = [];
+    if (opts.skill) {
+      skillNames = String(opts.skill).split(',').map((s) => s.trim()).filter(Boolean);
+      if (skillNames.includes('all')) skillNames = ['general', 'coding', 'writing'];
+    } else {
+      skillNames.push('general');
+      if (process.stdin.isTTY) {
+        const a1 = await askLine('是否同时安装 timem-coding-memory（coding 场景）？(y/N) ');
+        if (/^y(es)?$/i.test(a1)) skillNames.push('coding');
+        const a2 = await askLine('是否同时安装 timem-writing-memory（writing 场景）？(y/N) ');
+        if (/^y(es)?$/i.test(a2)) skillNames.push('writing');
+      }
+    }
     console.log('');
     const skillRoot = opts.skillDir || path.join(process.env.DSH_HOME || path.join(os.homedir(), '.dsh'), 'skills');
-    await installSkill(skillRoot, opts.forceSkill);
+    await installSkill(skillRoot, opts.forceSkill, skillNames);
   }
 
   // 7) 重启引导：询问是否重启 / 打印重启命令
