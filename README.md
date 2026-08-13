@@ -30,8 +30,10 @@ npx --yes github:aimaoge/timemspace-dsh-mcp --file /path/to/cordis.patch.yml --k
 npx --yes github:aimaoge/timemspace-dsh-mcp --dry-run --key sk-xxxx
 ```
 
-> 本机 HTTPS 拉取若报 `UNABLE_TO_VERIFY_LEAF_SIGNATURE`（TLS 被中间人拦截），改用 SSH 通道：
-> `npx --yes git+ssh://git@github.com/aimaoge/timemspace-dsh-mcp.git`
+> 本机 HTTPS 拉取若报 `UNABLE_TO_VERIFY_LEAF_SIGNATURE`（TLS 被中间人拦截；SSH 通道同样会经 HTTPS 下载 tarball）：
+> - PowerShell：`$env:npm_config_strict_ssl='false'; npx --yes github:aimaoge/timemspace-dsh-mcp`
+> - bash/zsh：`npm_config_strict_ssl=false npx --yes github:aimaoge/timemspace-dsh-mcp`
+> - 永久方案：把中间人根证书导出为 `.pem` 并设 `NODE_EXTRA_CA_CERTS=/path/to/ca.pem`
 
 ## 选项
 
