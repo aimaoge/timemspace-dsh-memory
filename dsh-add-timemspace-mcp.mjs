@@ -25,6 +25,7 @@ import os from 'node:os';
 import path from 'node:path';
 import readline from 'node:readline';
 import https from 'node:https';
+import { spawn } from 'node:child_process';
 
 const ENTRY_ID = 'mcp-timem-space';
 const DEFAULTS = {
@@ -38,7 +39,7 @@ function parseArgs(argv) {
   const opts = {
     file: null, key: null, url: null, serverName: null,
     dryRun: false, yes: false, help: false, version: false, checkUpdate: false,
-    verify: false, noVerify: false,
+    verify: false, noVerify: false, noRestart: false,
   };
   const TAKES_VALUE = new Set(['--file', '--key', '--url', '--server-name']);
   for (let i = 0; i < argv.length; i++) {
@@ -56,6 +57,7 @@ function parseArgs(argv) {
       case '--check-update': opts.checkUpdate = true; break;
       case '--verify': opts.verify = true; break;
       case '--no-verify': opts.noVerify = true; break;
+      case '--no-restart': opts.noRestart = true; break;
       case '--dry-run': opts.dryRun = true; break;
       case '--yes': case '-y': opts.yes = true; break;
       case '--help': case '-h': opts.help = true; break;
@@ -79,6 +81,7 @@ function printHelp() {
   --dry-run            只打印将要写入的内容，不修改文件
   --verify             只验证 MCP 端点连通/认证/工具清单，不修改配置
   --no-verify          写入配置后跳过自动验证
+  --no-restart          写入后不询问是否重启 DSH（直接打印重启命令）
   -y, --yes            跳过确认
   -v, --version        显示当前版本
   --check-update       检查是否有新版本（对比 GitHub 最新 tag）
@@ -377,6 +380,91 @@ function verifyConnection(url, key, userId) {
   });
 }
 
+/* ------------------------- DSH 重启引导 ------------------------- */
+/** 重启 DSH 的建议命令（DSH 经 npx 启动，跨平台统一）。 */
+function dshRestartCommand() {
+  return 'npx -y @deepseek-ai/dsh --profile web';
+}
+
+/** DSH web 端口：优先 DSH_WEB_URL 环境变量，否则默认 3080。 */
+function dshWebPort() {
+  const m = /:(\d+)\/?$/.exec(process.env.DSH_WEB_URL || '');
+  return m ? m[1] : '3080';
+}
+
+/** 执行命令并收集输出（spawn，无 shell 注入）。失败返回 {code:-1, out}。 */
+function execOut(cmd, args) {
+  return new Promise((resolve) => {
+    const cp = spawn(cmd, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    let out = '';
+    cp.stdout.on('data', (d) => { out += d; });
+    cp.stderr.on('data', (d) => { out += d; });
+    cp.on('error', (e) => resolve({ code: -1, out: String(e) }));
+    cp.on('close', (code) => resolve({ code, out }));
+  });
+}
+
+/** 找监听指定端口的 DSH 进程 PID（Windows netstat / Unix lsof）；找不到返回 null。 */
+async function findDshPid(port) {
+  try {
+    if (process.platform === 'win32') {
+      const r = await execOut('netstat', ['-ano']);
+      const line = r.out.split(/\r?\n/).find((l) => l.includes(`:${port}`) && l.includes('LISTENING'));
+      const pid = line && line.trim().split(/\s+/).pop();
+      return pid && /^\d+$/.test(pid) ? pid : null;
+    }
+    const r = await execOut('lsof', ['-ti', `tcp:${port}`]);
+    const pid = r.out.trim().split(/\r?\n/)[0];
+    return pid && /^\d+$/.test(pid) ? pid : null;
+  } catch {
+    return null;
+  }
+}
+
+async function killPid(pid) {
+  const r = process.platform === 'win32'
+    ? await execOut('taskkill', ['/F', '/PID', pid])
+    : await execOut('kill', ['-9', pid]);
+  return r.code === 0;
+}
+
+/** 后台 detached 拉起重启命令（不阻塞、不接管输出）。 */
+async function spawnDetached(cmdline) {
+  try {
+    const [cmd, ...args] = cmdline.split(/\s+/);
+    const cp = spawn(cmd, args, {
+      detached: true,
+      stdio: 'ignore',
+      shell: process.platform === 'win32',
+    });
+    cp.unref();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** 尝试自动重启 DSH：找进程 → kill → 重新拉起；任何一步失败则打印手动命令。 */
+async function restartDsh() {
+  const port = dshWebPort();
+  const pid = await findDshPid(port);
+  if (!pid) {
+    console.log(`[重启] 未找到监听 :${port} 的 DSH 进程（无法自动重启），请手动运行:`);
+    console.log(`  ${dshRestartCommand()}`);
+    return;
+  }
+  console.log(`[重启] 找到 DSH 进程 PID=${pid}（:${port}），正在终止并重启…`);
+  const killed = await killPid(pid);
+  if (!killed) {
+    console.log(`[重启] 终止 PID ${pid} 失败，请手动结束该进程后运行:`);
+    console.log(`  ${dshRestartCommand()}`);
+    return;
+  }
+  await spawnDetached(dshRestartCommand());
+  console.log('[重启] 已发起重启，DSH 正在拉起（约数秒）。若页面未恢复，请手动运行:');
+  console.log(`  ${dshRestartCommand()}`);
+}
+
 /* ------------------------- YAML 补丁 ------------------------- */
 function yamlScalar(v) {
   return /^[A-Za-z0-9_\-./]+$/.test(v) ? v : JSON.stringify(v);
@@ -547,8 +635,26 @@ async function main() {
     console.log('');
     const ok = await verifyConnection(url, key, null);
     if (!ok) {
-      console.log('\n[提示] 配置已写入，但连接验证未通过——请按上面原因修正（如重试 --key）后重启 DSH。');
+      console.log('\n[提示] 配置已写入，但连接验证未通过——请按上面原因修正后重跑本脚本，再重启 DSH。');
+      return;
     }
+  }
+
+  // 7) 重启引导：询问是否重启 / 打印重启命令
+  if (opts.noRestart) {
+    console.log('\n[重启] 配置已写入。重启 DSH 使其生效（当前会话会中断）:');
+    console.log(`  ${dshRestartCommand()}`);
+  } else if (process.stdin.isTTY) {
+    const ans = await askLine('\n需要现在重启 DSH 使配置生效吗？(y/N) ');
+    if (/^y(es)?$/i.test(ans)) {
+      await restartDsh();
+    } else {
+      console.log('\n[重启] 稍后手动重启 DSH 即可生效:');
+      console.log(`  ${dshRestartCommand()}`);
+    }
+  } else {
+    console.log('\n[重启] 非交互模式，请手动重启 DSH 使配置生效:');
+    console.log(`  ${dshRestartCommand()}`);
   }
 }
 
