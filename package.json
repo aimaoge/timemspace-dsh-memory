@@ -1,0 +1,29 @@
+{
+  "name": "dsh-add-mcp-timem",
+  "version": "0.1.0",
+  "description": "一键向 DeepSeek Harness 追加 TiMEM MCP 桥接：自动查找 cordis.patch.yml，交互式输入 API Key，幂等追加/更新配置",
+  "type": "module",
+  "bin": {
+    "dsh-add-mcp-timem": "./dsh-add-mcp-timem.mjs"
+  },
+  "main": "./dsh-add-mcp-timem.mjs",
+  "files": [
+    "dsh-add-mcp-timem.mjs",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=16"
+  },
+  "keywords": [
+    "deepseek-harness",
+    "timem",
+    "mcp",
+    "cordis",
+    "memory"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/<your-username>/timem-dsh-mcp.git"
+  }
+}
